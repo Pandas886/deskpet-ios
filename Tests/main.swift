@@ -200,3 +200,16 @@ do {
 } catch { assert((error as? ChatFailure) == .emptyReply && MockChatProtocol.calls == 2, "持续空内容不能误报网络或无限重试") }
 emptySession.invalidateAndCancel()
 print("通过：JSON模式空内容恢复与重试上限")
+
+var wakeGain = WakeAudioGain()
+let quietWave = (0..<1024).map { Float(sin(Double($0) * 0.2)) * 0.0005 }
+var amplified = quietWave
+for _ in 0..<20 { amplified = wakeGain.process(quietWave, sampleRate: 16000) }
+assert(wakeGain.gain > 10 && wakeGain.gain <= 16, "轻声收音应有受限增益，不靠降低唤醒阈值")
+assert(abs(amplified[10]) > abs(quietWave[10]) * 10, "轻声波形应实际得到补偿")
+let suddenLoud = wakeGain.process([0.9, -0.9, 0.2, -0.2], sampleRate: 16000)
+assert(suddenLoud.allSatisfy { abs($0) <= 0.951 }, "突然靠近麦克风不能导致削波")
+assert(suddenLoud[0] > 0 && suddenLoud[1] < 0, "限幅不能改变波形极性")
+assert(wakeGain.process([Float](repeating: 0, count: 1024), sampleRate: 16000).allSatisfy { $0 == 0 }, "静音不能凭空产生声音")
+assert(wakeGain.process([], sampleRate: 16000).isEmpty, "空缓冲不应引发除零")
+print("通过：唤醒轻声增益、增益上限、突然大声不削波、静音和空缓冲")

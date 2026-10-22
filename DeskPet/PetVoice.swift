@@ -151,7 +151,7 @@ final class PetVoice {
             } catch {
                 guard !Task.isCancelled, self.turn.accepts(ticket) else { return }
                 let message = ChatFailure.classify(error).localizedDescription
-                if self.localWake { self.standby(notice: message + "\n叫「小宠小宠」可继续") }
+                if self.localWake { self.standby(notice: message + "\n叫「瓦力瓦力」可继续") }
                 else { self.stop(message: message) }
             }
         }
@@ -200,7 +200,7 @@ final class PetVoice {
                     guard self.turn.accepts(ticket) else { return }
                     do {
                         try self.startAudio(recording: true, wakeOnly: true)
-                        self.update(.armed, notice ?? "叫「小宠小宠」· 本地待唤醒")
+                        self.update(.armed, notice ?? "叫「瓦力瓦力」· 本地待唤醒")
                         self.wake.setArmed(true)
                     } catch {
                         print("DeskPet wake setup failure: \(error as NSError)")

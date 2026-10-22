@@ -513,7 +513,7 @@ final class PetController: UIViewController, AVCaptureVideoDataOutputSampleBuffe
     }
 
     private func updateDiagnostics(faceCount: Int) {
-        detail.text = String(format: "v0.5.3 · 检测 %d 张脸 · %.1f ms\n样本 %d / 命中 %d · 温度状态 %@\n状态 %@ · 同帧检测，本地处理", faceCount, sampleMilliseconds, frameCount, detections, thermal, face.behavior.mood(now: CACurrentMediaTime()).rawValue)
+        detail.text = String(format: "v0.5.4 · 检测 %d 张脸 · %.1f ms\n样本 %d / 命中 %d · 温度状态 %@\n状态 %@ · 同帧检测，本地处理", faceCount, sampleMilliseconds, frameCount, detections, thermal, face.behavior.mood(now: CACurrentMediaTime()).rawValue)
         drawBox()
         let now = CACurrentMediaTime()
         if now - lastLog >= 10 {
@@ -553,7 +553,7 @@ final class PetController: UIViewController, AVCaptureVideoDataOutputSampleBuffe
             UIMenu(title: "中文音色试听", children: voice.chineseVoices.prefix(24).map { sound in
                 UIAction(title: "\(sound.name) · \(sound.language)\(sound.quality.rawValue > 1 ? " · 增强" : "")") { [weak self] _ in self?.voice.previewVoice(sound.identifier) }
             }),
-            UIAction(title: "本地唤醒：小宠小宠", state: voice.localWake ? .on : .off) { [weak self] _ in
+            UIAction(title: "本地唤醒：瓦力瓦力", state: voice.localWake ? .on : .off) { [weak self] _ in
                 guard let self else { return }
                 self.voice.localWake.toggle()
                 if self.voice.localWake { self.voice.standby() }

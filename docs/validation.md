@@ -145,3 +145,13 @@ plutil -lint outputs/DeskPet/Info.plist outputs/DeskPet/DeskPet.xcodeproj/projec
 公开目录单独执行 `./scripts/test.sh` 通过；`xcodebuild -project DeskPet.xcodeproj -scheme DeskPet -configuration Debug -destination 'generic/platform=iOS' -derivedDataPath <本地构建目录> CODE_SIGNING_ALLOWED=NO build` 通过。仅保留未使用 AppIntents 的非阻断提示。`plutil -lint`、本地文档链接检查、模型 SHA-256 校验通过。无签名构建不能当成已在另一台手机完成部署。
 
 发布前用 Gitleaks 8.30.1 扫描公开副本，未发现凭据；另行检查个人设备标识、本机绝对路径、签名身份和实际提交文件。测试中出现的 test-key、example.invalid 等均为不可用测试占位值。日志、证书、用户状态、原始照片/音视频和构建产物不纳入提交。
+
+## v0.5.4 唤醒漏检修正
+
+用户再次反馈正常位置需要重复、大声喊；此前“好像改善”的主观反馈不足以认定问题解决。对比后更换推荐词、模型与 KWS 输入音量补偿，阈值保持不变。完整样本和失败条件见 [唤醒对比记录](wake-benchmark.md)。
+
+初步合成对比中旧词仍有漏检；最终配置新词 18/18、兼容词 7/9、负样本 0/30 误触发。此结果不是实际用户统计。未保存或上传用户声音。
+
+v0.5.4 自动检查：`./scripts/test.sh`、模型 SHA-256 校验、`git diff --check` 通过；公开工程无签名构建、原机签名构建和 codesign 校验通过。实际启动确认模型就绪，RMS 诊断持续运行，当前窗口未见丢帧。Gitleaks 扫描约 13.26 MB 未发现凭据；无个人签名、设备 ID 或本机路径进入本次更改。
+
+尚待用户在原位置以自然音量完成“三次中几次一遍命中”的复测；未将合成样本成绩作为真人验收通过。新模型比旧模型大、候选路径更多，长时间功耗和发热仍需观察。

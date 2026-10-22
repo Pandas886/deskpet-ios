@@ -13,6 +13,7 @@ final class PetWakeWord {
     private var receivedSeconds: Double = 0
     private var loudestRMS: Float = 0
     private var reportAt = ProcessInfo.processInfo.systemUptime
+    private var levelCompensation = WakeAudioGain()
     private var spotter: SherpaOnnxKeywordSpotterWrapper?
 
     func prepare(_ done: @escaping (Bool) -> Void) {
@@ -29,7 +30,7 @@ final class PetWakeWord {
                     let model = sherpaOnnxOnlineModelConfig(tokens: tokens, transducer: transducer, numThreads: 1)
                     var config = sherpaOnnxKeywordSpotterConfig(
                         featConfig: sherpaOnnxFeatureConfig(sampleRate: 16000, featureDim: 80),
-                        modelConfig: model, keywordsFile: keywords)
+                        modelConfig: model, keywordsFile: keywords, maxActivePaths: 8)
                     self.spotter = SherpaOnnxKeywordSpotterWrapper(config: &config)
                 }
             }
@@ -48,7 +49,10 @@ final class PetWakeWord {
         loudestRMS = 0
         reportAt = ProcessInfo.processInfo.systemUptime
         lock.unlock()
-        queue.async { self.spotter?.reset() }
+        queue.async {
+            self.spotter?.reset()
+            self.levelCompensation = WakeAudioGain()
+        }
     }
 
     func accept(_ samples: UnsafePointer<Float>, count: Int, sampleRate: Double) {
@@ -68,6 +72,7 @@ final class PetWakeWord {
             let valid = self.armed && self.generation == ticket
             self.lock.unlock()
             guard valid, let spotter = self.spotter else { return }
+            let compensated = self.levelCompensation.process(copy, sampleRate: sampleRate)
             var sum: Float = 0
             for value in copy { sum += value * value }
             self.lock.lock()
@@ -76,25 +81,26 @@ final class PetWakeWord {
             let now = ProcessInfo.processInfo.systemUptime
             if now - self.reportAt >= 5 {
                 let decibels = 20 * log10(max(self.loudestRMS, 0.000001))
-                print(String(format: "DeskPet wake input: audio=%.1fs, loudestRMS=%.1fdBFS, dropped=%d",
-                             self.receivedSeconds, decibels, self.droppedChunks))
+                print(String(format: "DeskPet wake input: audio=%.1fs, loudestRMS=%.1fdBFS, dropped=%d, gain=%.1fx",
+                             self.receivedSeconds, decibels, self.droppedChunks, self.levelCompensation.gain))
                 self.receivedSeconds = 0
                 self.loudestRMS = 0
                 self.droppedChunks = 0
                 self.reportAt = now
             }
             self.lock.unlock()
-            spotter.acceptWaveform(samples: copy, sampleRate: Int(sampleRate))
+            spotter.acceptWaveform(samples: compensated, sampleRate: Int(sampleRate))
             while spotter.isReady() {
                 spotter.decode()
-                if !spotter.getResult().keyword.isEmpty {
+                let keyword = spotter.getResult().keyword
+                if !keyword.isEmpty {
                     self.lock.lock()
                     let deliver = self.armed && self.generation == ticket
                     if deliver { self.armed = false }
                     self.lock.unlock()
                     spotter.reset()
                     if deliver {
-                        print("DeskPet local wake: detected")
+                        print("DeskPet local wake: detected keyword=\(keyword)")
                         DispatchQueue.main.async {
                             self.lock.lock()
                             let current = self.generation == ticket
