@@ -246,3 +246,9 @@ for i in 0..<24 {
 }
 assert(quietDuplex.candidate("等等换个话题", now: 0.5, requireVoice: true) == "等等换个话题", "XR 实测音量的正常插话不能因音节间隙或旧固定门槛被丢弃")
 print("通过：低音量插话与音节短暂停顿的回归样本")
+
+assert(CaptureCadence.framesPerSecond(thermal: 0) == 15, "正常温度的相机应提供连续跟随的输入频率")
+assert(CaptureCadence.framesPerSecond(thermal: 1) == 15, "温热不应突然变成低帧率跳动")
+assert(CaptureCadence.framesPerSecond(thermal: 2) == 10, "较热时降低采集负担，但不能退回每半秒一次的位置更新")
+assert(CaptureCadence.framesPerSecond(thermal: 3) < CaptureCadence.framesPerSecond(thermal: 2), "过热仍需进一步降低采集负担")
+print("通过：相机采集节奏、较热时保留连续跟随和过热保护")

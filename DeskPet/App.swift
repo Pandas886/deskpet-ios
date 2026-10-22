@@ -22,9 +22,13 @@ final class FaceView: UIView {
     var onEffect: ((PetEffect) -> Void)?
     var onContact: (() -> Void)?
     var tilt: CGFloat = 0
+    var voiceState: PetVoice.State = .idle
     private var gaze = CGPoint.zero
-    private var eyeOpening: CGFloat = 0.85
-    private var lean: CGFloat = 0
+    private var pose = PetFacePose()
+    private let renderer = PetFaceRenderer()
+    private var lastTick: CFTimeInterval = 0
+    private var nextIdleLook: CFTimeInterval = 0
+    private var idleLook = CGPoint.zero
     private var nextBlink: CFTimeInterval = 0
     private var blinkStart: CFTimeInterval = -100
     private var clock: CADisplayLink?
@@ -64,6 +68,8 @@ final class FaceView: UIView {
     @objc private func tick() {
         let now = CACurrentMediaTime()
         guard UIApplication.shared.applicationState == .active else { return }
+        let dt = min(0.05, max(0, now - (lastTick == 0 ? now - 1 / 30 : lastTick)))
+        lastTick = now
         if now > nextBlink {
             blinkStart = now
             nextBlink = now + Double.random(in: 2.5...6)
@@ -74,67 +80,39 @@ final class FaceView: UIView {
             behavior.soothe(now: now)
         }
         var target = behavior.gaze(now: now)
+        if now - behavior.lastSeen > 4 {
+            if now > nextIdleLook {
+                idleLook = CGPoint(x: CGFloat.random(in: -0.38...0.38), y: CGFloat.random(in: -0.16...0.16))
+                nextIdleLook = now + Double.random(in: 3...7)
+            }
+            target = idleLook
+        }
+        if voiceState == .waiting && now - behavior.lastInteraction > 3 {
+            target = CGPoint(x: -0.24, y: -0.20)
+        }
         if let point = touchPoint {
             target = CGPoint(x: max(-1, min(1, (point.x / max(1, bounds.width) - 0.5) * 2)),
                              y: max(-1, min(1, (point.y / max(1, bounds.height) - 0.5) * 2)))
         }
-        gaze.x += (target.x - gaze.x) * 0.14
-        gaze.y += (target.y - gaze.y) * 0.14
+        let gazeAmount = CGFloat(1 - exp(-dt / 0.11))
+        gaze.x += (target.x - gaze.x) * gazeAmount
+        gaze.y += (target.y - gaze.y) * gazeAmount
         let mood = behavior.mood(now: now)
-        let opening: CGFloat
-        switch mood {
-        case .happy: opening = 0.46
-        case .relaxed: opening = 0.28
-        case .sleepy: opening = 0.10
-        case .startled, .held: opening = 1.0
-        case .shy: opening = 0.52
-        default: opening = 0.85
-        }
-        eyeOpening += (opening - eyeOpening) * 0.12
-        let wantedLean: CGFloat = mood == .curious ? 0.075 : (mood == .shy ? -0.10 : 0)
-        lean += (wantedLean + tilt - lean) * 0.10
+        var wanted = PetFacePose.target(mood)
+        wanted.lean += tilt
+        if touchPoint != nil { wanted.lean += gaze.x * 0.04 }
+        if mood == .calm && voiceState == .listening { wanted.asymmetry = 0.035 }
+        let time = wanted.smile > pose.smile ? 0.20 : 0.42
+        pose.approach(wanted, amount: CGFloat(1 - exp(-dt / time)))
         for effect in behavior.takeEffects() { onEffect?(effect) }
         setNeedsDisplay()
     }
 
     override func draw(_ rect: CGRect) {
         let now = CACurrentMediaTime()
-        let mood = behavior.mood(now: now)
-        let blinkPhase = (now - blinkStart) / 0.20
-        let openness = blinkPhase >= 0 && blinkPhase <= 1 ? max(0.05, abs(blinkPhase * 2 - 1)) : 1
-        let width = min(bounds.width * 0.23, bounds.height * 0.55)
-        let height = width * eyeOpening * openness
-        let gap = width * 0.30
-        let bounce = mood == .settling ? sin((behavior.reactionUntil - now) * 12) * 3 : 0
-        let center = CGPoint(x: bounds.midX + gaze.x * 20,
-                             y: bounds.midY + gaze.y * 12 + sin(now * 1.8) * 2 + bounce)
         guard let context = UIGraphicsGetCurrentContext() else { return }
-        context.saveGState()
-        context.translateBy(x: center.x, y: center.y)
-        context.rotate(by: lean)
-        context.translateBy(x: -center.x, y: -center.y)
-        for side in [-1.0, 1.0] {
-            let eye = CGRect(x: center.x + side * (width + gap) / 2 - width / 2,
-                             y: center.y - height / 2, width: width, height: height)
-            let path = UIBezierPath(roundedRect: eye, cornerRadius: min(width * 0.24, height / 2))
-            UIColor(red: 1, green: mood == .sleepy ? 0.61 : 0.76, blue: 0.20,
-                    alpha: mood == .sleepy ? 0.65 : 1).setFill()
-            path.fill()
-            guard openness > 0.4 && eyeOpening > 0.18 else { continue }
-            context.saveGState()
-            path.addClip()
-            let pupilScale: CGFloat = mood == .startled || mood == .held ? 0.8 : 1
-            let pupil = CGRect(x: eye.midX + gaze.x * width * 0.21 - width * 0.18 * pupilScale,
-                               y: eye.midY + gaze.y * width * 0.18 - width * 0.23 * pupilScale,
-                               width: width * 0.36 * pupilScale, height: width * 0.46 * pupilScale)
-            UIColor(white: 0.035, alpha: 1).setFill()
-            UIBezierPath(roundedRect: pupil, cornerRadius: width * 0.13).fill()
-            UIColor(white: 1, alpha: 0.75).setFill()
-            UIBezierPath(ovalIn: CGRect(x: pupil.minX + 5, y: pupil.minY + 5,
-                                       width: width * 0.07, height: width * 0.07)).fill()
-            context.restoreGState()
-        }
-        context.restoreGState()
+        renderer.draw(in: context, bounds: bounds, gaze: gaze, pose: pose,
+                      closure: PetFaceRenderer.blinkClosure(elapsed: now - blinkStart), now: now)
     }
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
@@ -142,6 +120,7 @@ final class FaceView: UIView {
         onContact?()
         let now = CACurrentMediaTime()
         touchPoint = point
+        blinkStart = now
         lastTouchPoint = point
         touchStarted = now
         lastTouchTime = now
@@ -207,6 +186,11 @@ final class PetController: UIViewController, AVCaptureVideoDataOutputSampleBuffe
     private var imageSize = CGSize(width: 640, height: 480)
     private var diagnostic = false
     private var configured = false
+    private var cameraDevice: AVCaptureDevice?
+    private var wantsPreview = false
+    private var processedFPS = 0.0
+    private var rateWindow: CFTimeInterval = 0
+    private var rateFrames = 0
     private var lastFrame: CFTimeInterval = 0
     private var frameCount = 0
     private var detections = 0
@@ -224,6 +208,12 @@ final class PetController: UIViewController, AVCaptureVideoDataOutputSampleBuffe
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
         #if DEBUG
+        if ProcessInfo.processInfo.arguments.contains("--camera-diagnostic") && !diagnostic {
+            toggleDiagnostic()
+        }
+        if ProcessInfo.processInfo.arguments.contains("--face-preview") {
+            PetFaceRenderer().exportPreview()
+        }
         if ProcessInfo.processInfo.arguments.contains("--voice-api-test"), !performedVoiceSelfTest {
             performedVoiceSelfTest = true
             DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
@@ -307,6 +297,7 @@ final class PetController: UIViewController, AVCaptureVideoDataOutputSampleBuffe
         voice.onMood = { [weak self] mood in self?.face.behavior.express(mood, now: CACurrentMediaTime()) }
         voice.onUpdate = { [weak self] state, text in
             guard let self else { return }
+            self.face.voiceState = state
             self.voiceLabel.text = text
             self.voiceLabel.isHidden = text.isEmpty
             self.microphoneButton.setImage(UIImage(systemName: state == .listening ? "paperplane.fill" : "mic.fill"), for: .normal)
@@ -366,6 +357,7 @@ final class PetController: UIViewController, AVCaptureVideoDataOutputSampleBuffe
         NotificationCenter.default.addObserver(self, selector: #selector(interrupted), name: AVCaptureSession.wasInterruptedNotification, object: session)
         NotificationCenter.default.addObserver(self, selector: #selector(activate), name: AVCaptureSession.interruptionEndedNotification, object: session)
         NotificationCenter.default.addObserver(self, selector: #selector(cameraError), name: AVCaptureSession.runtimeErrorNotification, object: session)
+        NotificationCenter.default.addObserver(self, selector: #selector(thermalChanged), name: ProcessInfo.thermalStateDidChangeNotification, object: nil)
         activate()
     }
 
@@ -449,6 +441,7 @@ final class PetController: UIViewController, AVCaptureVideoDataOutputSampleBuffe
                 let input = try AVCaptureDeviceInput(device: camera)
                 guard session.canAddInput(input) else { throw cameraSetupError() }
                 session.addInput(input)
+                cameraDevice = camera
                 let output = AVCaptureVideoDataOutput()
                 output.alwaysDiscardsLateVideoFrames = true
                 output.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarFullRange]
@@ -458,6 +451,7 @@ final class PetController: UIViewController, AVCaptureVideoDataOutputSampleBuffe
                 orient(output.connection(with: .video))
                 configured = true
             }
+            configureCameraRate()
             if !session.isRunning { session.startRunning() }
             DispatchQueue.main.async { self.status.text = "在找你 · 摸摸屏幕试试" }
         } catch { showError(error.localizedDescription) }
@@ -465,6 +459,26 @@ final class PetController: UIViewController, AVCaptureVideoDataOutputSampleBuffe
 
     private func cameraSetupError() -> NSError {
         NSError(domain: "DeskPet", code: 2, userInfo: [NSLocalizedDescriptionKey: "相机配置失败"])
+    }
+
+    @objc private func thermalChanged() {
+        cameraQueue.async { self.configureCameraRate() }
+    }
+
+    private func configureCameraRate() {
+        guard let camera = cameraDevice else { return }
+        let fps = CaptureCadence.framesPerSecond(thermal: ProcessInfo.processInfo.thermalState.rawValue)
+        guard camera.activeFormat.videoSupportedFrameRateRanges.contains(where: {
+            $0.minFrameRate <= Double(fps) && $0.maxFrameRate >= Double(fps)
+        }) else { print("DeskPet camera: requested rate unsupported"); return }
+        do {
+            try camera.lockForConfiguration()
+            defer { camera.unlockForConfiguration() }
+            let duration = CMTime(value: 1, timescale: Int32(fps))
+            camera.activeVideoMinFrameDuration = duration
+            camera.activeVideoMaxFrameDuration = duration
+            print("DeskPet camera: captureFPS=\(fps)")
+        } catch { print("DeskPet camera: rate configuration failed") }
     }
 
     private func showError(_ message: String) {
@@ -477,32 +491,36 @@ final class PetController: UIViewController, AVCaptureVideoDataOutputSampleBuffe
 
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
         let now = CACurrentMediaTime()
-        let hot = ProcessInfo.processInfo.thermalState.rawValue >= ProcessInfo.ThermalState.serious.rawValue
-        guard now - lastFrame >= (hot ? 0.5 : 0.125),
+        guard now - lastFrame >= 0.04,
               let pixel = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         lastFrame = now
         // Mirror exactly once, then use the identical pixels for Vision and the preview.
         let image = CIImage(cvPixelBuffer: pixel).oriented(.upMirrored)
-        guard let cameraFrame = imageContext.createCGImage(image, from: image.extent) else {
-            showError("无法转换相机画面")
-            return
-        }
         let request = VNDetectFaceRectanglesRequest()
         let start = CACurrentMediaTime()
         do {
-            try VNImageRequestHandler(cgImage: cameraFrame, orientation: .up).perform([request])
+            try VNImageRequestHandler(ciImage: image, orientation: .up).perform([request])
             let faces = (request.results ?? []).filter { $0.confidence >= 0.5 }
             let chosen = faces.max { $0.boundingBox.width * $0.boundingBox.height < $1.boundingBox.width * $1.boundingBox.height }
             let milliseconds = (CACurrentMediaTime() - start) * 1000
+            let cameraFrame = wantsPreview ? imageContext.createCGImage(image, from: image.extent) : nil
+            let size = image.extent.size
             DispatchQueue.main.async {
                 guard UIApplication.shared.applicationState == .active else { return }
                 self.lastFace = chosen?.boundingBox
-                self.imageSize = CGSize(width: cameraFrame.width, height: cameraFrame.height)
-                self.preview.image = UIImage(cgImage: cameraFrame)
+                self.imageSize = size
+                if self.diagnostic, let cameraFrame { self.preview.image = UIImage(cgImage: cameraFrame) }
                 self.face.saw(self.lastFace)
                 self.frameCount += 1
                 self.detections += chosen == nil ? 0 : 1
                 self.sampleMilliseconds = milliseconds
+                self.rateFrames += 1
+                if self.rateWindow == 0 { self.rateWindow = now }
+                if now - self.rateWindow >= 2 {
+                    self.processedFPS = Double(self.rateFrames - 1) / (now - self.rateWindow)
+                    self.rateFrames = 1
+                    self.rateWindow = now
+                }
                 self.status.text = chosen == nil ? "在找你 · 摸摸屏幕试试" : "看到你啦"
                 self.updateDiagnostics(faceCount: faces.count)
             }
@@ -520,7 +538,7 @@ final class PetController: UIViewController, AVCaptureVideoDataOutputSampleBuffe
     }
 
     private func updateDiagnostics(faceCount: Int) {
-        detail.text = String(format: "v0.6.0 · 检测 %d 张脸 · %.1f ms\n样本 %d / 命中 %d · 温度状态 %@\n状态 %@ · 同帧检测，本地处理", faceCount, sampleMilliseconds, frameCount, detections, thermal, face.behavior.mood(now: CACurrentMediaTime()).rawValue)
+        detail.text = String(format: "v0.7.0 · %.1f 帧/秒 · 检测 %.1f ms\n样本 %d / 命中 %d · 温度状态 %@\n状态 %@ · 同帧检测，本地处理", processedFPS, sampleMilliseconds, frameCount, detections, thermal, face.behavior.mood(now: CACurrentMediaTime()).rawValue)
         drawBox()
         let now = CACurrentMediaTime()
         if now - lastLog >= 10 {
@@ -528,6 +546,7 @@ final class PetController: UIViewController, AVCaptureVideoDataOutputSampleBuffe
             let line = String(format: "%.1f,%d,%d,%.2f,%d\n", Date().timeIntervalSince(started), frameCount, detections, sampleMilliseconds, ProcessInfo.processInfo.thermalState.rawValue)
             logLines += line
             print("DeskPet metrics: \(line.trimmingCharacters(in: .whitespacesAndNewlines))")
+            print("DeskPet camera: processedFPS=\(self.processedFPS)")
             try? logLines.write(to: logURL, atomically: true, encoding: .utf8)
         }
     }
@@ -540,6 +559,8 @@ final class PetController: UIViewController, AVCaptureVideoDataOutputSampleBuffe
 
     @objc private func toggleDiagnostic() {
         diagnostic.toggle()
+        let showPreview = diagnostic
+        frameQueue.async { self.wantsPreview = showPreview }
         preview.isHidden = !diagnostic
         detail.isHidden = !diagnostic
         status.isHidden = !diagnostic
