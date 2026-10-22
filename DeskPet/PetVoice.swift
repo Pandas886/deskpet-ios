@@ -11,7 +11,7 @@ final class PetVoice {
     private(set) var state: State = .idle
     var active: Bool { state != .idle || audioRunning }
     var duplex: Bool {
-        get { UserDefaults.standard.bool(forKey: "petDuplex") }
+        get { UserDefaults.standard.object(forKey: "petDuplex") as? Bool ?? true }
         set { UserDefaults.standard.set(newValue, forKey: "petDuplex") }
     }
     var onlineRecognition: Bool {
@@ -55,9 +55,10 @@ final class PetVoice {
     private var pendingBuffers = 0
     private var synthesisFinished = false
     private var spokenText = ""
-    private var spokenStarted: TimeInterval = 0
-    private var voicedSince: TimeInterval?
-    private var heardSpeech = false
+    private var duplexGate = DuplexGate()
+    private var recognitionRecoveries = 0
+    private var levelLogged: TimeInterval = 0
+    private var peakInput: Float = 0
     private var interruptionObserver: NSObjectProtocol?
     private var routeObserver: NSObjectProtocol?
 
@@ -127,7 +128,15 @@ final class PetVoice {
         timer?.invalidate()
         update(.waiting, "你：\(cleaned)\n正在想…")
         onMood?(.curious)
+        if duplex && sessionOpen && tapInstalled {
+            endpoint = SpeechEndpoint(now: CACurrentMediaTime())
+            recognitionRecoveries = 0
+            beginRecognition()
+            startEndpointTimer()
+        }
         let savedHistory = history
+        history.append(ChatMessage(role: "user", content: cleaned))
+        history = Array(history.suffix(12))
         task = Task { @MainActor [weak self] in
             guard let self else { return }
             do {
@@ -135,8 +144,6 @@ final class PetVoice {
                                                         history: savedHistory, key: VoiceKeychain.read(),
                                                         base: self.base, model: self.model)
                 guard !Task.isCancelled, self.turn.accepts(ticket), UIApplication.shared.applicationState == .active else { return }
-                self.history.append(ChatMessage(role: "user", content: cleaned))
-                self.history = Array(self.history.suffix(12))
                 self.onMood?(PetMood(rawValue: reply.mood) ?? .calm)
                 self.update(.speaking, reply.speech)
                 self.spokenText = reply.speech
@@ -147,7 +154,7 @@ final class PetVoice {
                     self.claimAudio {
                         guard self.turn.accepts(ticket) else { return }
                         do {
-                            if !self.engine.isRunning { try self.startAudio(recording: false) }
+                            if !self.engine.isRunning { try self.startAudio(recording: true) }
                             self.speak(reply.speech)
                         } catch { self.stop(message: "朗读暂不可用，文字回答：\(reply.speech)") }
                     }
@@ -232,6 +239,29 @@ final class PetVoice {
         }
     }
 
+    #if DEBUG
+    func testDuplex() {
+        stop(message: "全双工真机测试")
+        duplex = true
+        sessionOpen = true
+        let ticket = turn.id
+        authorize { [weak self] error in
+            guard let self, self.turn.accepts(ticket) else { return }
+            if let error { self.stop(message: error); return }
+            self.claimAudio {
+                guard self.turn.accepts(ticket) else { return }
+                do {
+                    try self.startAudio(recording: true)
+                    let text = "现在是语音插话测试。我会用平时的声音说一段话。你可以保持安静，看看我会不会被自己的声音打断。也可以在我说话的时候，用正常聊天的音量，直接提出一个新问题。不用再叫唤醒词，也不用按麦克风。"
+                    self.spokenText = text
+                    self.update(.speaking, "全双工测试 · 可直接插话")
+                    self.speak(text)
+                } catch { self.stop(message: "全双工测试音频启动失败") }
+            }
+        }
+    }
+    #endif
+
     private func authorize(checkAvailability: Bool = true, _ done: @escaping (String?) -> Void) {
         AVAudioApplication.requestRecordPermission { mic in
             guard mic else { DispatchQueue.main.async { done("请在系统设置中允许麦克风") }; return }
@@ -302,15 +332,20 @@ final class PetVoice {
         update(.listening, "我在听 · 说完停顿即可")
         onMood?(.curious)
         endpoint = SpeechEndpoint(now: CACurrentMediaTime())
-        heardSpeech = false
-        voicedSince = nil
+        duplexGate = DuplexGate()
+        recognitionRecoveries = 0
         beginRecognition()
+        startEndpointTimer()
+    }
+
+    private func startEndpointTimer() {
         timer?.invalidate()
         timer = Timer.scheduledTimer(withTimeInterval: 0.15, repeats: true) { [weak self] _ in self?.checkEndpoint() }
     }
 
     private func beginRecognition(forceOnline: Bool = false) {
         cancelRecognition()
+        duplexGate.resetRecognition()
         let ticket = recognitionID
         let request = SFSpeechAudioBufferRecognitionRequest()
         request.shouldReportPartialResults = true
@@ -323,30 +358,49 @@ final class PetVoice {
                 guard let self, self.recognitionID == ticket else { return }
                 if let result {
                     let text = result.bestTranscription.formattedString
-                    if self.state == .listening {
-                        self.endpoint.update(text, now: CACurrentMediaTime())
-                        self.update(.listening, "你：\(text)")
+                    print("DeskPet ASR: state=\(self.state), characters=\(text.count), final=\(result.isFinal)")
+                    let now = CACurrentMediaTime()
+                    let interrupting = self.state == .speaking || self.state == .waiting
+                    if (self.state == .listening || (self.duplex && self.sessionOpen && interrupting)),
+                       let candidate = self.duplexGate.candidate(text, now: now, requireVoice: interrupting) {
+                        if interrupting {
+                            _ = self.turn.next()
+                            self.task?.cancel()
+                            self.task = nil
+                            self.cancelSpeech()
+                            self.duplexGate.finishReply(now: now)
+                            self.spokenText = ""
+                            self.endpoint = SpeechEndpoint(now: now)
+                            self.onMood?(.curious)
+                            print("DeskPet duplex: confirmed interruption")
+                        }
+                        self.endpoint.update(candidate, now: now)
+                        self.update(.listening, "你：\(candidate)")
                         if result.isFinal { self.sendRecognized() }
-                    } else if self.state == .speaking && self.duplex && self.heardSpeech && text.count >= 2 {
-                        // Only interrupt after sustained near-end energy, not on every transcription.
-                        self.cancelSpeech()
-                        self.update(.listening, "你：\(text)")
-                        self.endpoint = SpeechEndpoint(now: CACurrentMediaTime())
-                        self.endpoint.update(text, now: CACurrentMediaTime())
-                        self.onMood?(.curious)
+                    } else if result.isFinal && self.state != .idle && self.state != .armed {
+                        self.beginRecognition(forceOnline: !request.requiresOnDeviceRecognition)
                     }
                 }
-                if error != nil && self.state == .listening {
-                    let failure = error! as NSError
+                guard self.recognitionID == ticket else { return }
+                if let error, self.sessionOpen && (self.state == .listening || self.state == .speaking || self.state == .waiting) {
+                    let failure = error as NSError
                     print("DeskPet recognition failure: \(failure.domain) / \(failure.code), local=\(request.requiresOnDeviceRecognition)")
-                    if !self.endpoint.text.isEmpty { self.sendRecognized() }
+                    if self.state == .listening && !self.endpoint.text.isEmpty { self.sendRecognized() }
                     else if SpeechRecovery.shouldRetryOnline(onDevice: request.requiresOnDeviceRecognition,
                                                             onlineAllowed: self.onlineRecognition) {
                         // Error 201 can occur for the local service even while Settings shows Dictation enabled.
                         self.preferOnlineRecognition = true
-                        self.endpoint = SpeechEndpoint(now: CACurrentMediaTime())
-                        self.update(.listening, "我在听 · 使用苹果联网识别")
+                        if self.state == .listening { self.update(.listening, "我在听 · 使用苹果联网识别") }
                         self.beginRecognition(forceOnline: true)
+                    } else if self.recognitionRecoveries < 2 {
+                        self.recognitionRecoveries += 1
+                        self.cancelRecognition()
+                        let recoveryTicket = self.recognitionID
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4 * Double(self.recognitionRecoveries)) { [weak self] in
+                            guard let self, self.sessionOpen, self.recognitionID == recoveryTicket,
+                                  UIApplication.shared.applicationState == .active else { return }
+                            self.beginRecognition(forceOnline: !request.requiresOnDeviceRecognition)
+                        }
                     } else if failure.domain == "kLSRErrorDomain" && failure.code == 201 {
                         self.stop(message: "苹果语音识别服务暂不可用（201），当前无法判断系统设置状态。\(self.onlineRecognition ? "请稍后再试" : "可在菜单允许苹果联网识别后重试")")
                     } else {
@@ -369,16 +423,15 @@ final class PetVoice {
 
     private func receiveLevel(_ rms: Float) {
         let now = CACurrentMediaTime()
-        guard state == .listening || (state == .speaking && duplex) else { return }
-        if rms > 0.025 {
-            endpoint.lastVoice = now
-            if voicedSince == nil { voicedSince = now }
-            if now - voicedSince! > 0.25 && (state != .speaking || now - spokenStarted > 0.6) {
-                heardSpeech = true
-            }
-        } else {
-            voicedSince = nil
-            if state == .speaking { heardSpeech = false }
+        guard state == .listening || (sessionOpen && duplex && (state == .speaking || state == .waiting)) else { return }
+        let duck = duplexGate.observe(rms, now: now, playing: state == .speaking)
+        if duplexGate.voiceActive { endpoint.lastVoice = now }
+        player.volume = duck ? 0.2 : 1
+        peakInput = max(peakInput, rms)
+        if now - levelLogged > 2 {
+            print("DeskPet duplex input: peak=\(peakInput), threshold=\(duplexGate.threshold), duck=\(duck), state=\(state)")
+            peakInput = 0
+            levelLogged = now
         }
     }
 
@@ -406,7 +459,6 @@ final class PetVoice {
     private func speak(_ text: String) {
         cancelSpeech()
         let ticket = speakingID
-        spokenStarted = CACurrentMediaTime()
         pendingBuffers = 0
         synthesisFinished = false
         let utterance = AVSpeechUtterance(string: text)
@@ -417,12 +469,11 @@ final class PetVoice {
         print("DeskPet TTS voice: \(utterance.voice?.name ?? "unknown") / \(utterance.voice?.language ?? "unknown")")
         #endif
         utterance.rate = AVSpeechUtteranceDefaultSpeechRate * 0.94
-        if duplex && tapInstalled && !spokenText.isEmpty {
+        if duplex && tapInstalled && sessionOpen {
             endpoint = SpeechEndpoint(now: CACurrentMediaTime())
-            heardSpeech = false
+            duplexGate.startReply(text)
             beginRecognition()
-            timer?.invalidate()
-            timer = Timer.scheduledTimer(withTimeInterval: 0.15, repeats: true) { [weak self] _ in self?.checkEndpoint() }
+            startEndpointTimer()
         }
         synthesizer.write(utterance) { [weak self] buffer in
             DispatchQueue.main.async {
@@ -469,6 +520,12 @@ final class PetVoice {
         guard synthesisFinished, pendingBuffers == 0, state == .speaking else { return }
         if !spokenText.isEmpty { history.append(ChatMessage(role: "assistant", content: spokenText)) }
         spokenText = ""
+        if duplex && sessionOpen && recognition != nil {
+            duplexGate.finishReply(now: CACurrentMediaTime())
+            endpoint = SpeechEndpoint(now: CACurrentMediaTime())
+            update(.listening, "你接着说，我在听…")
+            return
+        }
         cancelRecognition()
         timer?.invalidate()
         continueListening()
@@ -479,6 +536,11 @@ final class PetVoice {
             releaseAudio()
             update(.idle, "点麦克风开始聊天")
             resumeHandsFreeIfAuthorized()
+            return
+        }
+        if duplex && recognition != nil {
+            endpoint = SpeechEndpoint(now: CACurrentMediaTime())
+            update(.listening, "你接着说，我在听…")
             return
         }
         // Let the last loudspeaker samples drain before opening the next recognition request.
@@ -495,6 +557,7 @@ final class PetVoice {
         speakingID = UUID()
         synthesizer.stopSpeaking(at: .immediate)
         player.stop()
+        player.volume = 1
         pendingBuffers = 0
         synthesisFinished = false
     }

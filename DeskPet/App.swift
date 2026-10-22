@@ -255,6 +255,13 @@ final class PetController: UIViewController, AVCaptureVideoDataOutputSampleBuffe
                 self?.voice.microphone()
             }
         }
+        if ProcessInfo.processInfo.arguments.contains("--duplex-self-test"), !performedVoiceSelfTest {
+            performedVoiceSelfTest = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+                guard UIApplication.shared.applicationState == .active else { return }
+                self?.voice.testDuplex()
+            }
+        }
         if ProcessInfo.processInfo.arguments.contains("--voice-self-test"),
            !performedVoiceSelfTest,
            let sound = voice.defaultChineseVoice {
@@ -513,7 +520,7 @@ final class PetController: UIViewController, AVCaptureVideoDataOutputSampleBuffe
     }
 
     private func updateDiagnostics(faceCount: Int) {
-        detail.text = String(format: "v0.5.4 · 检测 %d 张脸 · %.1f ms\n样本 %d / 命中 %d · 温度状态 %@\n状态 %@ · 同帧检测，本地处理", faceCount, sampleMilliseconds, frameCount, detections, thermal, face.behavior.mood(now: CACurrentMediaTime()).rawValue)
+        detail.text = String(format: "v0.6.0 · 检测 %d 张脸 · %.1f ms\n样本 %d / 命中 %d · 温度状态 %@\n状态 %@ · 同帧检测，本地处理", faceCount, sampleMilliseconds, frameCount, detections, thermal, face.behavior.mood(now: CACurrentMediaTime()).rawValue)
         drawBox()
         let now = CACurrentMediaTime()
         if now - lastLog >= 10 {
@@ -560,7 +567,7 @@ final class PetController: UIViewController, AVCaptureVideoDataOutputSampleBuffe
                 else { self.voice.stop(message: "本地唤醒已关闭，点麦克风聊天") }
                 self.updateMenu()
             },
-            UIAction(title: "语音插话（实验）", state: voice.duplex ? .on : .off) { [weak self] _ in
+            UIAction(title: "全双工插话（测试版）", state: voice.duplex ? .on : .off) { [weak self] _ in
                 guard let self else { return }
                 self.voice.stop()
                 self.voice.duplex.toggle()

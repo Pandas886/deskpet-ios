@@ -213,3 +213,36 @@ assert(suddenLoud[0] > 0 && suddenLoud[1] < 0, "限幅不能改变波形极性")
 assert(wakeGain.process([Float](repeating: 0, count: 1024), sampleRate: 16000).allSatisfy { $0 == 0 }, "静音不能凭空产生声音")
 assert(wakeGain.process([], sampleRate: 16000).isEmpty, "空缓冲不应引发除零")
 print("通过：唤醒轻声增益、增益上限、突然大声不削波、静音和空缓冲")
+
+var duplexGate = DuplexGate()
+duplexGate.startReply("今天阳光很好，我们来聊聊你的桌面小宠吧。")
+for i in 0..<8 { _ = duplexGate.observe(0.03, now: Double(i) * 0.03, playing: true) }
+assert(duplexGate.candidate("今", now: 0.24, requireVoice: true) == nil, "回声的第一个字也不能抢先触发插话")
+assert(duplexGate.candidate("今天阳光很好", now: 0.25, requireVoice: true) == nil, "持续回声即使有能量也不能触发插话")
+assert(duplexGate.candidate("今天阳光很好，等等换个话题", now: 0.3, requireVoice: true) == "等等换个话题", "识别累计的回声前缀应去掉，保留插话开头")
+duplexGate.finishReply(now: 0.35)
+assert(duplexGate.candidate("今天阳光很好", now: 0.7, requireVoice: false) == nil, "播完后的回声尾音不能成为新问题")
+assert(duplexGate.candidate("今天天气怎么样", now: 1.5, requireVoice: false) == "今天天气怎么样", "正常接话应保留完整文字")
+
+var noiseGate = DuplexGate()
+noiseGate.startReply("我会继续讲这个故事")
+assert(!noiseGate.observe(0.08, now: 0, playing: true), "单次敲击不能降低朗读音量")
+_ = noiseGate.observe(0.0001, now: 0.04, playing: true)
+assert(noiseGate.candidate("等等", now: 0.1, requireVoice: true) == nil, "没有持续语音证据不能取消回复")
+for i in 0..<10 { _ = noiseGate.observe(0.015, now: 0.2 + Double(i) * 0.03, playing: true) }
+assert(noiseGate.observe(0.015, now: 0.5, playing: true), "正常近端语音应先降低播放音量")
+assert(noiseGate.candidate("别说了", now: 1, requireVoice: true) == "别说了", "短句结束后的识别延迟不能清除插话证据")
+assert(!noiseGate.observe(0.0001, now: 1.2, playing: true), "未确认的短噪声应恢复音量")
+assert(noiseGate.candidate("错误转写", now: 2, requireVoice: true) == nil, "旧语音证据不能无限触发新插话")
+for i in 0..<70 { _ = noiseGate.observe(0.03, now: 3 + Double(i) * 0.03, playing: true) }
+assert(!noiseGate.observe(0.03, now: 5.2, playing: true), "持续无文字噪声不能永久压低朗读音量")
+print("通过：回声过滤、回声尾音、插话首字保留、短噪声、延迟转写和音量恢复")
+
+var quietDuplex = DuplexGate()
+quietDuplex.startReply("我继续说，你可以插话")
+for i in 0..<24 {
+    let rms: Float = i % 6 == 5 ? 0.0001 : 0.002
+    _ = quietDuplex.observe(rms, now: Double(i) * 0.02, playing: true)
+}
+assert(quietDuplex.candidate("等等换个话题", now: 0.5, requireVoice: true) == "等等换个话题", "XR 实测音量的正常插话不能因音节间隙或旧固定门槛被丢弃")
+print("通过：低音量插话与音节短暂停顿的回归样本")
