@@ -257,7 +257,7 @@ final class PetController: UIViewController, AVCaptureVideoDataOutputSampleBuffe
         }
         if ProcessInfo.processInfo.arguments.contains("--voice-self-test"),
            !performedVoiceSelfTest,
-           let sound = voice.chineseVoices.first {
+           let sound = voice.defaultChineseVoice {
             performedVoiceSelfTest = true
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
                 guard UIApplication.shared.applicationState == .active else { return }

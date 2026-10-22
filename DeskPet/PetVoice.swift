@@ -28,6 +28,10 @@ final class PetVoice {
         AVSpeechSynthesisVoice.speechVoices().filter { $0.language.hasPrefix("zh") }
             .sorted { $0.quality.rawValue > $1.quality.rawValue }
     }
+    var defaultChineseVoice: AVSpeechSynthesisVoice? {
+        chineseVoices.first { $0.language == "zh-CN" && $0.name.localizedCaseInsensitiveContains("Rocko") } ??
+            chineseVoices.first { $0.language == "zh-CN" } ?? AVSpeechSynthesisVoice(language: "zh-CN")
+    }
     private let engine = AVAudioEngine()
     private let player = AVAudioPlayerNode()
     private let synthesizer = AVSpeechSynthesizer()
@@ -220,10 +224,10 @@ final class PetVoice {
         claimAudio { [weak self] in
             guard let self, self.turn.accepts(ticket) else { return }
             do {
-                try self.startAudio(recording: false)
-                self.spokenText = "我在这里呀。摸摸我的脑袋，或者和我聊聊今天的事。"
+                try self.startAudio(recording: true)
+                self.spokenText = ""
                 self.update(.speaking, "正在试听中文音色")
-                self.speak(self.spokenText)
+                self.speak("我在这里呀。摸摸我的脑袋，或者和我聊聊今天的事。")
             } catch { self.stop(message: "音色试听失败，请尝试其他声音") }
         }
     }
@@ -408,7 +412,10 @@ final class PetVoice {
         let utterance = AVSpeechUtterance(string: text)
         if let id = UserDefaults.standard.string(forKey: "petVoiceID"), let voice = AVSpeechSynthesisVoice(identifier: id) {
             utterance.voice = voice
-        } else { utterance.voice = chineseVoices.first ?? AVSpeechSynthesisVoice(language: "zh-CN") }
+        } else { utterance.voice = defaultChineseVoice }
+        #if DEBUG
+        print("DeskPet TTS voice: \(utterance.voice?.name ?? "unknown") / \(utterance.voice?.language ?? "unknown")")
+        #endif
         utterance.rate = AVSpeechUtteranceDefaultSpeechRate * 0.94
         if duplex && tapInstalled && !spokenText.isEmpty {
             endpoint = SpeechEndpoint(now: CACurrentMediaTime())
@@ -471,6 +478,7 @@ final class PetVoice {
         guard sessionOpen, tapInstalled, engine.isRunning else {
             releaseAudio()
             update(.idle, "点麦克风开始聊天")
+            resumeHandsFreeIfAuthorized()
             return
         }
         // Let the last loudspeaker samples drain before opening the next recognition request.
